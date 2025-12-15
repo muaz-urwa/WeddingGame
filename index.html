@@ -1,0 +1,990 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Catch the Bride — Unlock the Invite</title>
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b1020; overscroll-behavior: none; touch-action: none; }
+    .wrap { height: 100%; display:flex; align-items:center; justify-content:center; padding:16px; }
+    canvas { background: linear-gradient(#14214a, #0b1020); border-radius:16px; box-shadow: 0 20px 60px rgba(0,0,0,.4); max-width: 100%; height: auto; touch-action: none; }
+    
+    .touch-ui{
+      position:fixed; inset:0; z-index:20;
+      pointer-events:auto;
+      background:transparent;
+      touch-action:none;
+    }
+    .joy{
+      position:absolute; left:18px; bottom:18px;
+      width:160px; height:160px; border-radius:999px;
+      background:rgba(255,255,255,.08);
+      border:1px solid rgba(255,255,255,.14);
+      pointer-events:auto; touch-action:none;
+    }
+    .joy .knob{
+      position:absolute; left:50%; top:50%;
+      width:70px; height:70px; border-radius:999px;
+      transform:translate(-50%,-50%);
+      background:rgba(255,255,255,.16);
+      border:1px solid rgba(255,255,255,.18);
+    }
+    .btn{
+      position:absolute; right:18px; bottom:32px;
+      width:140px; height:72px; border-radius:18px;
+      background:rgba(255,255,255,.10);
+      border:1px solid rgba(255,255,255,.16);
+      color:rgba(255,255,255,.92);
+      font:700 18px system-ui;
+      pointer-events:auto;
+    }
+    .btn.small{
+      width:120px;
+      height:48px;
+      border-radius:14px;
+      font-size:14px;
+    }
+    .left-stack{
+      position:absolute;
+      left:18px;
+      bottom:200px;
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      pointer-events:auto;
+    }
+    @media (pointer:fine){
+      .touch-ui{ display:none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="game" width="960" height="540"></canvas>
+  </div>
+
+  <div class="touch-ui" id="touchUI" aria-hidden="true">
+    <div class="joy" id="joy"><div class="knob" id="knob"></div></div>
+    <button class="btn" id="dashBtn">DASH</button>
+    <div class="left-stack">
+      <button class="btn small" id="startBtn">START</button>
+      <button class="btn small" id="restartBtn">RESTART</button>
+      <button class="btn small" id="newMazeBtn">NEW MAZE</button>
+    </div>
+  </div>
+
+<script>
+(() => {
+  "use strict";
+
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+
+  // Images in same directory
+  const groomImg = new Image(); groomImg.src = "groom.png";
+  const brideImg = new Image(); brideImg.src = "bride.png";
+  const villainImg = new Image(); villainImg.src = "villain.png";
+
+  // ====== Game tuning ======
+  const GAME_TIME = 20;
+
+  // Player sizes (smaller to fit corridors)
+  const R = 14;                 // collision radius
+  const DRAW_SIZE = 52;         // sprite draw size
+
+  // Groom
+  const GROOM_SPEED = 300;
+  const DASH_SPEED = 600;
+  const DASH_DURATION = 0.12;
+  const DASH_COOLDOWN = 1.45;
+
+  // Bride (hard, but fair in maze)
+  const BRIDE_SPEED = 300;
+  const BRIDE_ACCEL = 12.0;
+  const BRIDE_FRICTION = 0.08;
+
+  // Villain (chases groom)
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.userAgent));
+  const VILLAIN_SPEED = isIOS ? 160 : 245;
+  const VILLAIN_ACCEL = 12.0;
+  const VILLAIN_FRICTION = 0.10;
+  const VILLAIN_RECALC_EVERY = 0.18;
+
+  // Catch distances
+  const CATCH_DIST = 25;            // groom catches bride
+  const VILLAIN_CATCH_DIST = 30;    // villain catches groom -> lose
+
+  // AI refresh
+  const AI_RECALC_EVERY = 0.22;
+
+  // === Fixes: arrival + turning slowdown + multi-iteration collision ===
+  const ARRIVE_RADIUS = 12; // px
+  function angleBetween(ax,ay,bx,by){
+    const a = norm(ax,ay), b = norm(bx,by);
+    return Math.acos(clamp(a.x*b.x + a.y*b.y, -1, 1));
+  }
+
+  // ====== World bounds ======
+  const W = canvas.width, H = canvas.height;
+  const bounds = { x: 28, y: 28, w: W-56, h: H-56 };
+
+  // ====== Maze settings ======
+  const COLS = 14;
+  const ROWS = 8;
+  const CELL = Math.floor(Math.min(bounds.w / COLS, bounds.h / ROWS)); // ~60
+  const WALL_T = 8;
+  const MAZE_POOL = [
+    20251215, 20251216, 20251217, 20251218, 20251219,
+    42424242, 13371337, 9001001, 7777777, 31415926
+  ];
+
+  // Add loops / rooms
+  const EXTRA_HOLES = 22;
+  const ROOM_CUTS = 2;
+
+  // ====== Invitation content ======
+  const INVITE_HTML = `
+    <div style="max-width:520px;margin:0 auto;text-align:center">
+      <h1 style="margin:.2em 0;font-size:42px">You unlocked the invite! 💍</h1>
+      <p style="font-size:18px;line-height:1.45;margin:0.2em 0 1em">
+        <strong>Hamza & Iqra</strong><br/>
+        Sunday 28 Dec 2025 • 2:00 PM<br/>
+        The Fancy Place, Lahore
+      </p>
+      <p style="margin:0 0 1em">Screenshot this or copy the details. 🎉</p>
+      <p style="opacity:.8;margin:0">Dress code: “Look dangerously good.”</p>
+    </div>
+  `;
+
+  // ====== State ======
+  const State = { START:"start", PLAY:"play", WIN:"win", LOSE:"lose" };
+  let state = State.START;
+
+  // ====== Input ======
+  const keys = new Set();
+  window.addEventListener("keydown", (e) => {
+    if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+    keys.add(e.key.toLowerCase());
+
+    if (e.key.toLowerCase() === "r") restart();
+    if (e.key.toLowerCase() === "n") newMaze();
+    if (state === State.START && (e.key === "Enter" || e.key === " ")) startGame();
+  }, { passive:false });
+  window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+  const isDown = (k) => keys.has(k);
+
+  // Mobile: tap canvas to start/restart
+  canvas.addEventListener("pointerdown", () => {
+    if (state === State.START) startGame();
+    else if (state === State.LOSE || state === State.WIN) restart();
+  }, { passive: true });
+
+  // ---- Touch controls (iPhone) ----
+  let touchMove = {x:0, y:0};   // -1..1
+  let touchDash = false;
+
+  const joy = document.getElementById("joy");
+  const knob = document.getElementById("knob");
+  const dashBtn = document.getElementById("dashBtn");
+
+  function setKnob(nx, ny){
+    const max = 55; // knob travel px
+    knob.style.transform = `translate(${nx*max}px, ${ny*max}px) translate(-50%,-50%)`;
+  }
+
+  let joyActiveId = null;
+  let joyCenter = null;
+
+  joy.addEventListener("pointerdown", (e) => {
+    joyActiveId = e.pointerId;
+    joy.setPointerCapture(e.pointerId);
+    const r = joy.getBoundingClientRect();
+    joyCenter = { x: r.left + r.width/2, y: r.top + r.height/2 };
+    e.preventDefault();
+  }, {passive:false});
+
+  joy.addEventListener("pointermove", (e) => {
+    if (e.pointerId !== joyActiveId || !joyCenter) return;
+    const dx = e.clientX - joyCenter.x;
+    const dy = e.clientY - joyCenter.y;
+    const max = 60;
+    const nx = clamp(dx/max, -1, 1);
+    const ny = clamp(dy/max, -1, 1);
+    touchMove.x = nx;
+    touchMove.y = ny;
+    setKnob(nx, ny);
+    e.preventDefault();
+  }, {passive:false});
+
+  function joyUp(){
+    joyActiveId = null;
+    joyCenter = null;
+    touchMove.x = 0; touchMove.y = 0;
+    setKnob(0,0);
+  }
+  joy.addEventListener("pointerup", joyUp);
+  joy.addEventListener("pointercancel", joyUp);
+
+  dashBtn.addEventListener("pointerdown", (e)=>{ touchDash = true; e.preventDefault(); }, {passive:false});
+  dashBtn.addEventListener("pointerup",   (e)=>{ touchDash = false; e.preventDefault(); }, {passive:false});
+  dashBtn.addEventListener("pointercancel",(e)=>{ touchDash = false; e.preventDefault(); }, {passive:false});
+
+  // On-screen buttons
+  document.getElementById("startBtn").addEventListener("pointerdown", (e) => {
+    startGame(); e.preventDefault();
+  }, {passive:false});
+
+  document.getElementById("restartBtn").addEventListener("pointerdown", (e) => {
+    restart(); e.preventDefault();
+  }, {passive:false});
+
+  document.getElementById("newMazeBtn").addEventListener("pointerdown", (e) => {
+    newMaze(); e.preventDefault();
+  }, {passive:false});
+
+  // Touch UI background tap
+  const touchUI = document.getElementById("touchUI");
+  
+  // If you tap empty space on the touch UI, start/restart (great on iPhone)
+  touchUI.addEventListener("pointerdown", (e) => {
+    if (e.target !== touchUI) return; // only background, not buttons/joystick
+    if (state === State.START) startGame();
+    else if (state === State.LOSE || state === State.WIN) restart();
+  }, { passive: true });
+
+  // ====== Helpers ======
+  const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+  const hypot = (x,y) => Math.hypot(x,y);
+  const norm = (x,y) => {
+    const l = Math.hypot(x,y) || 1;
+    return { x:x/l, y:y/l };
+  };
+
+  // deterministic rng (Mulberry32)
+  function mulberry32(seed) {
+    let t = seed >>> 0;
+    return function() {
+      t += 0x6D2B79F5;
+      let r = Math.imul(t ^ (t >>> 15), 1 | t);
+      r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+      return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  let seed = MAZE_POOL[Math.floor(Math.random() * MAZE_POOL.length)];
+  let rnd = mulberry32(seed);
+
+  // ====== Entities ======
+  const groom = { x:0, y:0, r:R, vx:0, vy:0, dashLeft:0, dashCd:0 };
+  const bride = {
+    x:0, y:0, r:R, vx:0, vy:0,
+    aiT:0,
+    distFromGroom: null,
+    distToDest: null,
+    destCell: null,
+    nextCell: null,
+    stuckT: 0, lastX: 0, lastY: 0
+  };
+  const villain = {
+    x:0, y:0, r:R, vx:0, vy:0,
+    aiT:0,
+    distToGroom: null,
+    nextCell: null,
+    stuckT:0, lastX:0, lastY:0
+  };
+
+  let timeLeft = GAME_TIME;
+  let lastT = performance.now();
+  let msg = "";
+
+  // ====== Maze grid ======
+  let maze = [];
+  function initMaze() {
+    maze = [];
+    for (let y=0;y<ROWS;y++){
+      const row=[];
+      for (let x=0;x<COLS;x++){
+        row.push({ n:true, e:true, s:true, w:true, vis:false });
+      }
+      maze.push(row);
+    }
+  }
+
+  function inGrid(x,y){ return x>=0 && y>=0 && x<COLS && y<ROWS; }
+
+  function carveMazeDFS() {
+    const stack = [];
+    let cx = Math.floor(rnd()*COLS);
+    let cy = Math.floor(rnd()*ROWS);
+    maze[cy][cx].vis = true;
+    stack.push([cx,cy]);
+
+    const dirs = [
+      {dx:0, dy:-1, a:"n", b:"s"},
+      {dx:1, dy:0,  a:"e", b:"w"},
+      {dx:0, dy:1,  a:"s", b:"n"},
+      {dx:-1,dy:0,  a:"w", b:"e"},
+    ];
+
+    while (stack.length) {
+      const [x,y] = stack[stack.length-1];
+      const opts = [];
+      for (const d of dirs) {
+        const nx=x+d.dx, ny=y+d.dy;
+        if (inGrid(nx,ny) && !maze[ny][nx].vis) opts.push(d);
+      }
+      if (!opts.length) { stack.pop(); continue; }
+
+      const d = opts[Math.floor(rnd()*opts.length)];
+      const nx=x+d.dx, ny=y+d.dy;
+
+      maze[y][x][d.a] = false;
+      maze[ny][nx][d.b] = false;
+
+      maze[ny][nx].vis = true;
+      stack.push([nx,ny]);
+    }
+
+    for (let yy=0;yy<ROWS;yy++) for (let xx=0;xx<COLS;xx++) maze[yy][xx].vis = false;
+  }
+
+  function knockOutRandomWalls(count) {
+    for (let i=0;i<count;i++){
+      const x = Math.floor(rnd()*COLS);
+      const y = Math.floor(rnd()*ROWS);
+      const c = maze[y][x];
+
+      const options = [];
+      if (y>0) options.push(["n", 0,-1, "s"]);
+      if (x<COLS-1) options.push(["e", 1,0, "w"]);
+      if (y<ROWS-1) options.push(["s", 0,1, "n"]);
+      if (x>0) options.push(["w", -1,0, "e"]);
+      if (!options.length) continue;
+
+      const [a,dx,dy,b] = options[Math.floor(rnd()*options.length)];
+      const nx=x+dx, ny=y+dy;
+      c[a] = false;
+      maze[ny][nx][b] = false;
+    }
+  }
+
+  function carveRoom() {
+    const rx = 2 + Math.floor(rnd()*(COLS-4));
+    const ry = 1 + Math.floor(rnd()*(ROWS-3));
+    const openPair = (x,y,dir) => {
+      const c = maze[y][x];
+      if (dir === "e" && x<COLS-1) { c.e=false; maze[y][x+1].w=false; }
+      if (dir === "s" && y<ROWS-1) { c.s=false; maze[y+1][x].n=false; }
+    };
+    openPair(rx,ry,"e");   openPair(rx,ry,"s");
+    openPair(rx+1,ry,"s"); openPair(rx,ry+1,"e");
+  }
+
+  // ====== Walls from maze ======
+  let walls = [];
+
+  function cellToWorld(cx, cy) {
+    return { x: bounds.x + cx*CELL, y: bounds.y + cy*CELL };
+  }
+
+  function rebuildWalls() {
+    walls = [];
+
+    walls.push({x: bounds.x, y: bounds.y, w: COLS*CELL, h: WALL_T});
+    walls.push({x: bounds.x, y: bounds.y + ROWS*CELL - WALL_T, w: COLS*CELL, h: WALL_T});
+    walls.push({x: bounds.x, y: bounds.y, w: WALL_T, h: ROWS*CELL});
+    walls.push({x: bounds.x + COLS*CELL - WALL_T, y: bounds.y, w: WALL_T, h: ROWS*CELL});
+
+    for (let y=0;y<ROWS;y++){
+      for (let x=0;x<COLS;x++){
+        const c = maze[y][x];
+        const p = cellToWorld(x,y);
+
+        if (c.n) walls.push({x: p.x, y: p.y, w: CELL, h: WALL_T});
+        if (c.w) walls.push({x: p.x, y: p.y, w: WALL_T, h: CELL});
+
+        if (y === ROWS-1 && c.s) walls.push({x: p.x, y: p.y + CELL - WALL_T, w: CELL, h: WALL_T});
+        if (x === COLS-1 && c.e) walls.push({x: p.x + CELL - WALL_T, y: p.y, w: WALL_T, h: CELL});
+      }
+    }
+  }
+
+  function neighbors(cx,cy) {
+    const out = [];
+    const c = maze[cy][cx];
+    if (!c.n && inGrid(cx,cy-1)) out.push([cx,cy-1]);
+    if (!c.e && inGrid(cx+1,cy)) out.push([cx+1,cy]);
+    if (!c.s && inGrid(cx,cy+1)) out.push([cx,cy+1]);
+    if (!c.w && inGrid(cx-1,cy)) out.push([cx-1,cy]);
+    return out;
+  }
+
+  function worldToCell(x,y) {
+    const cx = clamp(Math.floor((x - bounds.x) / CELL), 0, COLS-1);
+    const cy = clamp(Math.floor((y - bounds.y) / CELL), 0, ROWS-1);
+    return [cx,cy];
+  }
+
+  function cellCenter(cx,cy) {
+    const p = cellToWorld(cx,cy);
+    return { x: p.x + CELL/2, y: p.y + CELL/2 };
+  }
+
+  // ====== Collision: circle vs rect + slide ======
+  function circleVsRectNormal(c, r) {
+    const closestX = clamp(c.x, r.x, r.x + r.w);
+    const closestY = clamp(c.y, r.y, r.y + r.h);
+    const dx = c.x - closestX;
+    const dy = c.y - closestY;
+    const d = Math.hypot(dx, dy);
+
+    if (d === 0) {
+      const left = Math.abs(c.x - r.x);
+      const right = Math.abs((r.x + r.w) - c.x);
+      const top = Math.abs(c.y - r.y);
+      const bottom = Math.abs((r.y + r.h) - c.y);
+      const m = Math.min(left, right, top, bottom);
+      if (m === left) return { hit:true, nx:-1, ny:0, penetration:c.r };
+      if (m === right) return { hit:true, nx:1, ny:0, penetration:c.r };
+      if (m === top) return { hit:true, nx:0, ny:-1, penetration:c.r };
+      return { hit:true, nx:0, ny:1, penetration:c.r };
+    }
+
+    if (d < c.r) return { hit:true, nx: dx/d, ny: dy/d, penetration: c.r - d };
+    return { hit:false, nx:0, ny:0, penetration:0 };
+  }
+
+  function resolveCircleRectSlide(ent, rect) {
+    const col = circleVsRectNormal(ent, rect);
+    if (!col.hit) return false;
+
+    ent.x += col.nx * col.penetration;
+    ent.y += col.ny * col.penetration;
+
+    const vn = ent.vx * col.nx + ent.vy * col.ny;
+    if (vn < 0) {
+      ent.vx -= vn * col.nx;
+      ent.vy -= vn * col.ny;
+    }
+    return true;
+  }
+
+  // ====== AI BFS helpers ======
+  function bfsFrom(startCx, startCy) {
+    const dist = Array.from({length: ROWS}, () => Array(COLS).fill(-1));
+    const q = [];
+    dist[startCy][startCx] = 0;
+    q.push([startCx, startCy]);
+
+    for (let i=0;i<q.length;i++){
+      const [x,y] = q[i];
+      const d = dist[y][x];
+      for (const [nx,ny] of neighbors(x,y)) {
+        if (dist[ny][nx] === -1) {
+          dist[ny][nx] = d + 1;
+          q.push([nx,ny]);
+        }
+      }
+    }
+    return dist;
+  }
+
+  function farthestCell(distField) {
+    let best = [0,0], bestD = -1;
+    for (let y=0;y<ROWS;y++){
+      for (let x=0;x<COLS;x++){
+        const d = distField[y][x];
+        if (d > bestD) { bestD = d; best = [x,y]; }
+      }
+    }
+    return best;
+  }
+
+  function nextStepTowardDest(distToDest, bcx, bcy) {
+    const here = distToDest[bcy][bcx];
+    if (here <= 0) return [bcx,bcy];
+
+    let best = [bcx,bcy];
+    let bestD = here;
+
+    for (const [nx,ny] of neighbors(bcx,bcy)) {
+      const d = distToDest[ny][nx];
+      if (d !== -1 && d < bestD) {
+        bestD = d;
+        best = [nx,ny];
+      }
+    }
+    return best;
+  }
+
+  // ====== Game lifecycle ======
+  function buildMaze() {
+    initMaze();
+    carveMazeDFS();
+    for (let i=0;i<ROOM_CUTS;i++) carveRoom();
+    knockOutRandomWalls(EXTRA_HOLES);
+    rebuildWalls();
+  }
+
+  function resetPositions() {
+    const g = cellCenter(1, ROWS-2);
+    const b = cellCenter(COLS-2, 1);
+    const v = cellCenter(Math.floor(COLS/2), Math.floor(ROWS/2)); // villain starts center-ish
+
+    groom.x=g.x; groom.y=g.y; groom.vx=0; groom.vy=0; groom.dashLeft=0; groom.dashCd=0;
+
+    bride.x=b.x; bride.y=b.y; bride.vx=0; bride.vy=0;
+    bride.aiT=0;
+    bride.distFromGroom=null;
+    bride.distToDest=null;
+    bride.destCell=null;
+    bride.nextCell=null;
+    bride.lastX = bride.x;
+    bride.lastY = bride.y;
+    bride.stuckT = 0;
+
+    villain.x=v.x; villain.y=v.y; villain.vx=0; villain.vy=0;
+    villain.aiT=0;
+    villain.distToGroom=null;
+    villain.nextCell=null;
+    villain.lastX = villain.x;
+    villain.lastY = villain.y;
+    villain.stuckT = 0;
+  }
+
+  function startGame() {
+    state = State.PLAY;
+    timeLeft = GAME_TIME;
+    msg = "";
+    resetPositions();
+  }
+
+  function restart() {
+    seed = MAZE_POOL[Math.floor(Math.random() * MAZE_POOL.length)];
+    rnd = mulberry32(seed);
+    buildMaze();
+
+    state = State.START;
+    msg = "";
+    timeLeft = GAME_TIME;
+    resetPositions();
+  }
+
+  function newMaze() {
+    seed = MAZE_POOL[Math.floor(Math.random() * MAZE_POOL.length)];
+    rnd = mulberry32(seed);
+    buildMaze();
+    restart();
+  }
+
+  // ====== Update ======
+  function update(dt) {
+    if (state !== State.PLAY) return;
+
+    timeLeft -= dt;
+    if (timeLeft <= 0) {
+      timeLeft = 0;
+      state = State.LOSE;
+      msg = "Time’s up! Play again to unlock the invite.";
+      return;
+    }
+
+    // --- Groom movement ---
+    let ix = 0, iy = 0;
+
+    // keyboard
+    if (isDown("arrowleft") || isDown("a")) ix -= 1;
+    if (isDown("arrowright")|| isDown("d")) ix += 1;
+    if (isDown("arrowup")   || isDown("w")) iy -= 1;
+    if (isDown("arrowdown") || isDown("s")) iy += 1;
+
+    // touch joystick overrides if active
+    if (Math.abs(touchMove.x) > 0.05 || Math.abs(touchMove.y) > 0.05) {
+      ix = touchMove.x;
+      iy = touchMove.y;
+    }
+
+    const d = norm(ix, iy);
+    let speed = GROOM_SPEED;
+
+    groom.dashCd = Math.max(0, groom.dashCd - dt);
+    if (groom.dashLeft > 0) {
+      groom.dashLeft = Math.max(0, groom.dashLeft - dt);
+      speed = DASH_SPEED;
+    } else if ((isDown(" ") || touchDash) && groom.dashCd <= 0 && (ix !== 0 || iy !== 0)) {
+      groom.dashLeft = DASH_DURATION;
+      groom.dashCd = DASH_COOLDOWN;
+      speed = DASH_SPEED;
+    }
+
+    groom.vx = d.x * speed;
+    groom.vy = d.y * speed;
+    groom.x += groom.vx * dt;
+    groom.y += groom.vy * dt;
+
+    for (const w of walls) resolveCircleRectSlide(groom, w);
+
+    // --- Bride AI: farthest destination + follow path ---
+    bride.aiT -= dt;
+
+    const movedB = hypot(bride.x - bride.lastX, bride.y - bride.lastY);
+    bride.lastX = bride.x; bride.lastY = bride.y;
+    if (movedB < 0.20) bride.stuckT += dt;
+    else bride.stuckT = Math.max(0, bride.stuckT - dt*1.5);
+    const forceReplanB = bride.stuckT > 0.40;
+
+    if (bride.aiT <= 0 || forceReplanB) {
+      bride.aiT = AI_RECALC_EVERY;
+      bride.stuckT = 0;
+
+      const [gcx,gcy] = worldToCell(groom.x, groom.y);
+      bride.distFromGroom = bfsFrom(gcx, gcy);
+      bride.destCell = farthestCell(bride.distFromGroom);
+
+      const [dx,dy] = bride.destCell;
+      bride.distToDest = bfsFrom(dx, dy);
+
+      const [bcx,bcy] = worldToCell(bride.x, bride.y);
+      bride.nextCell = nextStepTowardDest(bride.distToDest, bcx, bcy);
+    }
+
+    {
+      const [bcx,bcy] = worldToCell(bride.x, bride.y);
+      if (bride.distToDest && bride.destCell) {
+        bride.nextCell = nextStepTowardDest(bride.distToDest, bcx, bcy);
+      }
+    }
+
+    // arrival radius + step
+    let [tx,ty] = bride.nextCell ?? worldToCell(bride.x, bride.y);
+    let target = cellCenter(tx,ty);
+
+    if (bride.distToDest && bride.destCell) {
+      const dd = Math.hypot(target.x - bride.x, target.y - bride.y);
+      if (dd < ARRIVE_RADIUS) {
+        const [bcx,bcy] = worldToCell(bride.x, bride.y);
+        bride.nextCell = nextStepTowardDest(bride.distToDest, bcx, bcy);
+        [tx,ty] = bride.nextCell ?? [bcx,bcy];
+        target = cellCenter(tx,ty);
+      }
+    }
+
+    // slow down on sharp turns
+    let speedMul = 1.0;
+    if (bride.distToDest && bride.nextCell) {
+      const [bcx,bcy] = worldToCell(bride.x, bride.y);
+      const next2 = nextStepTowardDest(bride.distToDest, bride.nextCell[0], bride.nextCell[1]);
+      const c0 = cellCenter(bcx,bcy);
+      const c1 = cellCenter(bride.nextCell[0], bride.nextCell[1]);
+      const c2 = cellCenter(next2[0], next2[1]);
+      const v1 = {x: c1.x - c0.x, y: c1.y - c0.y};
+      const v2 = {x: c2.x - c1.x, y: c2.y - c1.y};
+      const ang = angleBetween(v1.x,v1.y,v2.x,v2.y);
+      if (ang > 0.7) speedMul = 0.82;
+      if (ang > 1.1) speedMul = 0.70;
+    }
+
+    const to = norm(target.x - bride.x, target.y - bride.y);
+    const targetVx = to.x * BRIDE_SPEED * speedMul;
+    const targetVy = to.y * BRIDE_SPEED * speedMul;
+
+    bride.vx += (targetVx - bride.vx) * (1 - Math.exp(-BRIDE_ACCEL * dt));
+    bride.vy += (targetVy - bride.vy) * (1 - Math.exp(-BRIDE_ACCEL * dt));
+    bride.vx *= (1 - BRIDE_FRICTION * dt);
+    bride.vy *= (1 - BRIDE_FRICTION * dt);
+
+    bride.x += bride.vx * dt;
+    bride.y += bride.vy * dt;
+
+    let hitB = false;
+    for (let iter = 0; iter < 3; iter++) {
+      let any = false;
+      for (const w of walls) {
+        if (resolveCircleRectSlide(bride, w)) any = true;
+      }
+      if (any) hitB = true;
+      else break;
+    }
+    if (hitB) bride.aiT = Math.min(bride.aiT, 0.02);
+
+    // --- Villain AI: chase groom using BFS-to-groom + follow path ---
+    villain.aiT -= dt;
+
+    const movedV = hypot(villain.x - villain.lastX, villain.y - villain.lastY);
+    villain.lastX = villain.x; villain.lastY = villain.y;
+    if (movedV < 0.20) villain.stuckT += dt;
+    else villain.stuckT = Math.max(0, villain.stuckT - dt*1.5);
+    const forceReplanV = villain.stuckT > 0.45;
+
+    if (villain.aiT <= 0 || forceReplanV) {
+      villain.aiT = VILLAIN_RECALC_EVERY;
+      villain.stuckT = 0;
+
+      const [gcx,gcy] = worldToCell(groom.x, groom.y);
+      villain.distToGroom = bfsFrom(gcx, gcy);
+
+      const [vcx,vcy] = worldToCell(villain.x, villain.y);
+      villain.nextCell = nextStepTowardDest(villain.distToGroom, vcx, vcy);
+    }
+
+    // cheap stepping
+    if (villain.distToGroom) {
+      const [vcx,vcy] = worldToCell(villain.x, villain.y);
+      villain.nextCell = nextStepTowardDest(villain.distToGroom, vcx, vcy);
+    }
+
+    // arrival radius for villain too (helps turns)
+    let [vtx,vty] = villain.nextCell ?? worldToCell(villain.x, villain.y);
+    let vTarget = cellCenter(vtx, vty);
+
+    if (villain.distToGroom) {
+      const dd = Math.hypot(vTarget.x - villain.x, vTarget.y - villain.y);
+      if (dd < ARRIVE_RADIUS) {
+        const [vcx,vcy] = worldToCell(villain.x, villain.y);
+        villain.nextCell = nextStepTowardDest(villain.distToGroom, vcx, vcy);
+        [vtx,vty] = villain.nextCell ?? [vcx,vcy];
+        vTarget = cellCenter(vtx,vty);
+      }
+    }
+
+    // villain turn slow-down (a bit less than bride so it feels scary)
+    let vSpeedMul = 1.0;
+    if (villain.distToGroom && villain.nextCell) {
+      const [vcx,vcy] = worldToCell(villain.x, villain.y);
+      const next2 = nextStepTowardDest(villain.distToGroom, villain.nextCell[0], villain.nextCell[1]);
+      const c0 = cellCenter(vcx,vcy);
+      const c1 = cellCenter(villain.nextCell[0], villain.nextCell[1]);
+      const c2 = cellCenter(next2[0], next2[1]);
+      const v1 = {x: c1.x - c0.x, y: c1.y - c0.y};
+      const v2 = {x: c2.x - c1.x, y: c2.y - c1.y};
+      const ang = angleBetween(v1.x,v1.y,v2.x,v2.y);
+      if (ang > 0.8) vSpeedMul = 0.88;
+      if (ang > 1.2) vSpeedMul = 0.78;
+    }
+
+    const vTo = norm(vTarget.x - villain.x, vTarget.y - villain.y);
+    const vTargetVx = vTo.x * VILLAIN_SPEED * vSpeedMul;
+    const vTargetVy = vTo.y * VILLAIN_SPEED * vSpeedMul;
+
+    villain.vx += (vTargetVx - villain.vx) * (1 - Math.exp(-VILLAIN_ACCEL * dt));
+    villain.vy += (vTargetVy - villain.vy) * (1 - Math.exp(-VILLAIN_ACCEL * dt));
+    villain.vx *= (1 - VILLAIN_FRICTION * dt);
+    villain.vy *= (1 - VILLAIN_FRICTION * dt);
+
+    villain.x += villain.vx * dt;
+    villain.y += villain.vy * dt;
+
+    let hitV = false;
+    for (let iter = 0; iter < 3; iter++) {
+      let any = false;
+      for (const w of walls) {
+        if (resolveCircleRectSlide(villain, w)) any = true;
+      }
+      if (any) hitV = true;
+      else break;
+    }
+    if (hitV) villain.aiT = Math.min(villain.aiT, 0.02);
+
+    // --- Win/Lose checks ---
+    // villain catches groom -> lose
+    if (hypot(villain.x - groom.x, villain.y - groom.y) <= VILLAIN_CATCH_DIST) {
+      state = State.LOSE;
+      msg = "The villain caught the groom! 😈 Try again.";
+      return;
+    }
+
+    // groom catches bride -> win
+    if (hypot(groom.x - bride.x, groom.y - bride.y) <= CATCH_DIST) {
+      state = State.WIN;
+      msg = "Caught! Invitation unlocked 🎉";
+      return;
+    }
+  }
+
+  // ====== Draw ======
+  function draw() {
+    ctx.clearRect(0,0,W,H);
+
+    // maze area border
+    ctx.save();
+    ctx.strokeStyle = "rgba(255,255,255,0.12)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(bounds.x, bounds.y, COLS*CELL, ROWS*CELL, 16);
+    ctx.stroke();
+    ctx.restore();
+
+    // walls
+    for (const w of walls) {
+      ctx.save();
+      ctx.fillStyle = "rgba(255,255,255,0.12)";
+      ctx.strokeStyle = "rgba(255,255,255,0.18)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(w.x, w.y, w.w, w.h, 8);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // HUD
+    ctx.save();
+    ctx.fillStyle = "rgba(255,255,255,0.92)";
+    ctx.font = "600 18px system-ui";
+    ctx.fillText(`Time: ${Math.ceil(timeLeft)}s`, 26, 26);
+    const cd = groom.dashCd > 0 ? groom.dashCd.toFixed(1) : "ready";
+    ctx.fillText(`Dash: ${cd}`, 140, 26);
+    ctx.fillText(`New maze: N`, 250, 26);
+    ctx.restore();
+
+    // Draw order: villain behind? (feels like chasing)
+    drawCharacter(villain, villainImg, "😈");
+    drawCharacter(bride, brideImg, "👰");
+    drawCharacter(groom, groomImg, "🤵");
+
+    if (state === State.START) {
+      overlay(`
+        <h1 style="margin:.1em 0 0;font-size:44px">Catch the Bride</h1>
+        <p style="margin:.6em 0 1em;font-size:18px;opacity:.9">
+          You have <strong>${GAME_TIME}s</strong> to catch her and unlock the invitation.<br/>
+          Avoid the villain! If they catch you, you lose 😈
+        </p>
+        <p style="margin:.2em 0;font-size:16px;opacity:.85">
+          Move: WASD / Arrow Keys • Dash: Space • Restart: R • New maze: N
+        </p>
+        <p style="margin:1em 0 0;font-size:16px;opacity:.9">
+          Press <strong>Enter</strong> or <strong>Space</strong> to start.
+        </p>
+      `);
+    } else if (state === State.LOSE) {
+      overlay(`
+        <h1 style="margin:.1em 0 0;font-size:44px">Game over 😅</h1>
+        <p style="margin:.6em 0 1em;font-size:18px;opacity:.9">${escapeHtml(msg)}</p>
+        <p style="margin:0;font-size:16px;opacity:.85">Press <strong>R</strong> to try again.</p>
+      `);
+    } else if (state === State.WIN) {
+      overlay(`
+        ${INVITE_HTML}
+        <p style="margin:1em 0 0;font-size:16px;opacity:.85">Press <strong>R</strong> to play again.</p>
+      `);
+    }
+  }
+
+  function drawCharacter(ent, img, fallbackEmoji="") {
+    ctx.save();
+    ctx.translate(ent.x, ent.y);
+
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.beginPath();
+    ctx.ellipse(0, ent.r + 16, 18, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(0, 0, ent.r + 12, 0, Math.PI*2);
+    ctx.clip();
+
+    if (img && img.complete && img.naturalWidth > 0) {
+      ctx.drawImage(img, -DRAW_SIZE/2, -DRAW_SIZE/2, DRAW_SIZE, DRAW_SIZE);
+    } else {
+      ctx.fillStyle = "rgba(255,255,255,0.18)";
+      ctx.beginPath();
+      ctx.arc(0, 0, ent.r + 12, 0, Math.PI*2);
+      ctx.fill();
+      if (fallbackEmoji) {
+        ctx.fillStyle = "rgba(255,255,255,0.85)";
+        ctx.font = "28px system-ui";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(fallbackEmoji, 0, 1);
+      }
+    }
+    ctx.restore();
+
+    ctx.strokeStyle = "rgba(255,255,255,0.35)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, ent.r + 12, 0, Math.PI*2);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  // ====== Overlay DOM ======
+  let overlayDiv = null;
+  function overlay(innerHtml) {
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(0,0,W,H);
+    ctx.restore();
+    ensureOverlayDiv(innerHtml);
+  }
+  function ensureOverlayDiv(html) {
+    if (!overlayDiv) {
+      overlayDiv = document.createElement("div");
+      overlayDiv.style.position = "fixed";
+      overlayDiv.style.inset = "0";
+      overlayDiv.style.display = "flex";
+      overlayDiv.style.alignItems = "center";
+      overlayDiv.style.justifyContent = "center";
+      overlayDiv.style.pointerEvents = "none";
+      overlayDiv.style.padding = "24px";
+      overlayDiv.style.zIndex = "10";
+      document.body.appendChild(overlayDiv);
+    }
+    overlayDiv.innerHTML = `
+      <div style="
+        pointer-events:none;
+        max-width:720px;
+        width:100%;
+        background: rgba(15,18,30,0.86);
+        border: 1px solid rgba(255,255,255,0.14);
+        box-shadow: 0 20px 80px rgba(0,0,0,0.5);
+        border-radius: 18px;
+        padding: 26px 22px;
+        color: rgba(255,255,255,0.95);
+        text-align:center;">
+        ${html}
+      </div>
+    `;
+  }
+  function hideOverlayDiv() { if (overlayDiv) overlayDiv.innerHTML = ""; }
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"
+    }[c]));
+  }
+
+  // roundRect polyfill
+  if (!CanvasRenderingContext2D.prototype.roundRect) {
+    CanvasRenderingContext2D.prototype.roundRect = function(x,y,w,h,r){
+      r = Math.min(r, w/2, h/2);
+      this.beginPath();
+      this.moveTo(x+r, y);
+      this.arcTo(x+w, y, x+w, y+h, r);
+      this.arcTo(x+w, y+h, x, y+h, r);
+      this.arcTo(x, y+h, x, y, r);
+      this.arcTo(x, y, x+w, y, r);
+      this.closePath();
+      return this;
+    };
+  }
+
+  // ====== Main loop ======
+  function frame(t) {
+    const dt = Math.min(0.033, (t - lastT) / 1000);
+    lastT = t;
+    if (state === State.PLAY) hideOverlayDiv();
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  // Build and start
+  buildMaze();
+  restart();
+  requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
